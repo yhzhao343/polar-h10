@@ -1,0 +1,37 @@
+{
+  "name": "polar-h10",
+  "version": "1.0.0",
+  "description": "For reading polar-h10 data",
+  "license": "ISC",
+  "author": "Yuhui Zhao",
+  "type": "module",
+  "exports": {
+    "require": "./dist/cjs/index.js",
+    "import": "./dist/esm/index.js"
+  },
+  "main": "./dist/esm/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build-cjs": "esbuild --bundle src/PolarH10.ts --outfile=dist/cjs/index.js --platform=neutral --format=cjs --sourcemap --external:node:perf_hooks",
+    "build-esm": "esbuild --bundle src/PolarH10.ts --outfile=dist/esm/index.js --platform=neutral --format=esm --sourcemap --external:node:perf_hooks",
+    "build-types": "tsc --lib es2022,dom --declaration src/PolarH10.ts --emitDeclarationOnly --outDir ./dist/",
+    "build": "npm run build-cjs && npm run build-esm",
+    "build-all": "npm run build-cjs && npm run build-esm && npm run build-types",
+    "clean": "rm -r dist"
+  },
+  "types": "dist/PolarH10.d.ts",
+  "postinstall": "npm run build-all",
+  "devDependencies": {
+    "@types/web-bluetooth": "^0.0.21",
+    "esbuild": "^0.25.4",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "repository": {
+    "url": "https://github.com/yhzhao343/polar-h10"
+  }
+}
