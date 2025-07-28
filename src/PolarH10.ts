@@ -2,18 +2,67 @@ import {
   PMD_SERVICE_ID,
   PMD_CTRL_CHAR,
   PMD_DATA_CHAR,
-  PolarSensorType,
-  PolarSensorNames,
   PolarPMDCommand,
   setting_parsers,
   setting_parser_offsets,
-  PolarSensorInfo,
   PolarSettingType,
   ERROR_MSGS,
-  PMDCtrlReply,
-  PolarH10Data,
-  DataHandlerDict,
 } from "./consts";
+
+export enum PolarSensorType {
+  ECG = 0,
+  PPG = 1,
+  ACC = 2,
+  PPI = 3,
+  GYRO = 5,
+  MAGNETOMETER = 6,
+  SDK_MODE = 9,
+  LOCATION = 10,
+  PRESSURE = 11,
+  TEMPERATURE = 12,
+}
+
+export interface DataHandlerDict {
+  [key: (typeof PolarSensorNames)[number]]: ((data: PolarH10Data) => void)[];
+}
+
+export interface PolarH10Data {
+  type: (typeof PolarSensorNames)[number];
+  samples?: Int16Array | Int32Array;
+  sample_timestamp_ms: number;
+  prev_sample_timestamp_ms: number;
+  recv_epoch_time_ms: number;
+  event_time_offset_ms: number;
+}
+
+export const PolarSettingNames = Object.keys(PolarSettingType).filter((t) =>
+  isNaN(Number(t)),
+);
+
+export const PolarSensorNames = Object.keys(PolarSensorType).filter((t) =>
+  isNaN(Number(t)),
+);
+
+export const PolarPMDCommandNames = Object.keys(PolarPMDCommand).filter((t) =>
+  isNaN(Number(t)),
+);
+
+type PolarSettingNameKeys = (typeof PolarSettingNames)[number];
+
+export interface PolarSensorInfo {
+  type: (typeof PolarPMDCommandNames)[number];
+  error: (typeof ERROR_MSGS)[number];
+  more_frames: number;
+  settings: Record<PolarSettingNameKeys, number[] | number[][]>;
+}
+
+export interface PMDCtrlReply {
+  type: (typeof PolarPMDCommandNames)[number];
+  sensor: (typeof PolarSensorNames)[number];
+  error: (typeof ERROR_MSGS)[number];
+  more_frames: number;
+  reserved?: number;
+}
 
 export class PolarH10 {
   device: BluetoothDevice;

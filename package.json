@@ -32,6 +32,6 @@
     "node": ">=22.0.0"
   },
   "repository": {
-    "url": "https://github.com/yhzhao343/polar-h10"
+    "url": "git+https://github.com/yhzhao343/polar-h10.git"
   }
 }
