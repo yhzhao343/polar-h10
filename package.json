@@ -1,6 +1,6 @@
 {
   "name": "polar-h10",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "For reading polar-h10 data",
   "license": "ISC",
   "author": "Yuhui Zhao",

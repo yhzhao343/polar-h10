@@ -7,6 +7,8 @@ import {
   setting_parser_offsets,
   PolarSettingType,
   ERROR_MSGS,
+  HEART_RATE_SERVICE_UUID,
+  HEART_RATE_MEASUREMENT_CHARACTERISTIC_UUID,
 } from "./consts";
 
 export enum PolarSensorType {
@@ -22,8 +24,11 @@ export enum PolarSensorType {
   TEMPERATURE = 12,
 }
 
+export type PolarSensorHandlerFunc = (data: PolarH10Data) => void;
+export type HeartRateHandlerFunc = (data: HeartRateInfo) => void;
+
 export interface DataHandlerDict {
-  [key: (typeof PolarSensorNames)[number]]: ((data: PolarH10Data) => void)[];
+  [key: (typeof PolarSensorNames)[number]]: PolarSensorHandlerFunc[];
 }
 
 export interface PolarH10Data {
@@ -34,6 +39,14 @@ export interface PolarH10Data {
   recv_epoch_time_ms: number;
   event_time_offset_ms: number;
 }
+
+export interface HeartRateInfo {
+  heart_rate_bpm: number;
+  rr_intervals_ms: number[];
+  recv_epoch_time_ms: number;
+}
+
+export type HeartRateHandlers = HeartRateHandlerFunc[];
 
 export const PolarSettingNames = Object.keys(PolarSettingType).filter((t) =>
   isNaN(Number(t)),
@@ -72,9 +85,12 @@ export class PolarH10 {
   PMDDataChar: BluetoothRemoteGATTCharacteristic | undefined = undefined;
   BattService: BluetoothRemoteGATTService | undefined = undefined;
   BattLvlChar: BluetoothRemoteGATTCharacteristic | undefined = undefined;
+  HeartRateService: BluetoothRemoteGATTService | undefined = undefined;
+  HeartRateChar: BluetoothRemoteGATTCharacteristic | undefined = undefined;
   streaming: boolean = false;
   verbose: boolean = true;
-  dataHandle: DataHandlerDict = {};
+  dataHandleDict: DataHandlerDict = {};
+  heartRateHandleList: HeartRateHandlers = [];
   timeOffset: bigint = BigInt(0);
   eventTimeOffset: number;
   lastECGTimestamp: number;
@@ -90,33 +106,47 @@ export class PolarH10 {
     this.ACCStarted = false;
     this.ECGStarted = false;
     for (let i = 0; i < PolarSensorNames.length; i++) {
-      this.dataHandle[PolarSensorNames[i]] = [];
+      this.dataHandleDict[PolarSensorNames[i]] = [];
     }
   }
 
   addEventListener(
     type: (typeof PolarSensorNames)[number],
-    handler: (data: PolarH10Data) => void,
+    handler: PolarSensorHandlerFunc,
   ) {
-    if (!this.dataHandle[type].includes(handler)) {
-      this.dataHandle[type].push(handler);
+    if (!this.dataHandleDict[type].includes(handler)) {
+      this.dataHandleDict[type].push(handler);
+    }
+  }
+
+  addHeartRateEventListener(handler: HeartRateHandlerFunc) {
+    if (!this.heartRateHandleList.includes(handler)) {
+      this.heartRateHandleList.push(handler);
     }
   }
 
   removeEventListener(
     type: (typeof PolarSensorNames)[number],
-    handler: (data: PolarH10Data) => void,
+    handler: PolarSensorHandlerFunc,
   ) {
-    let index = this.dataHandle[type].indexOf(handler);
+    let index = this.dataHandleDict[type].indexOf(handler);
     if (index > -1) {
-      this.dataHandle[type].splice(index, 1);
+      this.dataHandleDict[type].splice(index, 1);
+    }
+    return index;
+  }
+
+  removeHeartRateEventListener(handler: HeartRateHandlerFunc) {
+    let index = this.heartRateHandleList.indexOf(handler);
+    if (index > -1) {
+      this.heartRateHandleList.splice(index, 1);
     }
     return index;
   }
 
   clearEventListner(type: (typeof PolarSensorNames)[number]) {
-    delete this.dataHandle[type];
-    this.dataHandle[type] = [];
+    delete this.dataHandleDict[type];
+    this.dataHandleDict[type] = [];
   }
 
   log(...o: any[]) {
@@ -145,9 +175,25 @@ export class PolarH10 {
       await this.BattService?.getCharacteristic("battery_level");
     this.log(`    Got battery level characteristic`);
 
+    this.HeartRateService = await this.server?.getPrimaryService(
+      HEART_RATE_SERVICE_UUID,
+    );
+    this.log(`  Got heart rate Service`);
+    this.HeartRateChar = await this.HeartRateService?.getCharacteristic(
+      HEART_RATE_MEASUREMENT_CHARACTERISTIC_UUID,
+    );
+    // this.log(`  Got heart rate Characteristic`);
+    // this.HeartRateChar?.startNotifications();
+    // this.log(`    Start notification`);
+
     this.PMDDataChar?.addEventListener(
       "characteristicvaluechanged",
       this.PMDDataHandle.bind(this),
+    );
+
+    this.HeartRateChar?.addEventListener(
+      "characteristicvaluechanged",
+      this.HearRateHandle.bind(this),
     );
   }
 
@@ -252,6 +298,48 @@ export class PolarH10 {
     }
   }
 
+  HearRateHandle(event: any) {
+    const val: DataView = event.target.value;
+
+    const hear_rate_info: HeartRateInfo = {
+      heart_rate_bpm: -1,
+      rr_intervals_ms: [],
+      recv_epoch_time_ms: event.timeStamp + performance.timeOrigin,
+    };
+    const flags = val.getUint8(0);
+    let offset = 1;
+
+    // Determine if HR format is 8-bit (0) or 16-bit (1) based on the first flag bit
+    const heartRateFormat = flags & 0x01;
+
+    if (heartRateFormat === 1) {
+      hear_rate_info.heart_rate_bpm = val.getUint16(offset, true); // 16-bit, little-endian
+      offset += 2;
+    } else {
+      hear_rate_info.heart_rate_bpm = val.getUint8(offset); // 8-bit
+      offset += 1;
+    }
+
+    // Check if R-R intervals are present (Bit 4, val 16)
+    const rrIntervalPresent = (flags & 0x10) !== 0;
+    // const rrIntervals = [];
+
+    if (rrIntervalPresent) {
+      // Read 16-bit R-R intervals until the end of the data view
+      while (offset < val.byteLength) {
+        const rawRrInterval = val.getUint16(offset, true);
+        // Convert raw 1/1024 second units to milliseconds
+        const rrIntervalMs = (rawRrInterval / 1024.0) * 1000.0;
+        hear_rate_info.rr_intervals_ms.push(rrIntervalMs); // Format to 2 decimal places
+        offset += 2;
+      }
+    }
+
+    for (const handler of this.heartRateHandleList) {
+      handler(hear_rate_info);
+    }
+  }
+
   PMDDataHandle(event: any) {
     const val: DataView = event.target.value;
     const dataTimeStamp = val.getBigUint64(1, true);
@@ -298,7 +386,7 @@ export class PolarH10 {
         }
         break;
     }
-    for (const handler of this.dataHandle[PolarSensorType[type]]) {
+    for (const handler of this.dataHandleDict[PolarSensorType[type]]) {
       handler(dataFrame);
     }
   }
@@ -322,6 +410,14 @@ export class PolarH10 {
         return startReply;
       }
     }
+  }
+
+  async startHeartRate() {
+    await this.HeartRateChar?.startNotifications();
+  }
+
+  async stopheartRate() {
+    await this.HeartRateChar?.stopNotifications();
   }
 
   async startACC(

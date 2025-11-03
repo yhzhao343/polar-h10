@@ -2,6 +2,10 @@ export const PMD_SERVICE_ID = "fb005c80-02e7-f387-1cad-8acd2d8df0c8";
 export const PMD_CTRL_CHAR = "fb005c81-02e7-f387-1cad-8acd2d8df0c8";
 export const PMD_DATA_CHAR = "fb005c82-02e7-f387-1cad-8acd2d8df0c8";
 
+export const HEART_RATE_SERVICE_UUID = "heart_rate"; // or '0x180D'
+export const HEART_RATE_MEASUREMENT_CHARACTERISTIC_UUID =
+  "heart_rate_measurement"; // or '0x2A37'
+
 export enum PolarSettingType {
   SAMPLE_RATE = 0,
   RESOLUTION = 1,
