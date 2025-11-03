@@ -1,15 +1,24 @@
 import {
-  PMD_SERVICE_ID,
-  PMD_CTRL_CHAR,
-  PMD_DATA_CHAR,
   PolarPMDCommand,
   setting_parsers,
   setting_parser_offsets,
   PolarSettingType,
   ERROR_MSGS,
-  HEART_RATE_SERVICE_UUID,
-  HEART_RATE_MEASUREMENT_CHARACTERISTIC_UUID,
 } from "./consts";
+
+export const PMD_SERVICE_ID = "fb005c80-02e7-f387-1cad-8acd2d8df0c8";
+export const PMD_CTRL_CHAR = "fb005c81-02e7-f387-1cad-8acd2d8df0c8";
+export const PMD_DATA_CHAR = "fb005c82-02e7-f387-1cad-8acd2d8df0c8";
+
+export const HEART_RATE_SERVICE_UUID = "0000180d-0000-1000-8000-00805f9b34fb"; // or '0x180D'
+export const HEART_RATE_MEASUREMENT_CHARACTERISTIC_UUID =
+  "00002a37-0000-1000-8000-00805f9b34fb"; // or '0x2A37'
+
+export const SERVICES = [
+  PMD_SERVICE_ID,
+  HEART_RATE_SERVICE_UUID,
+  "battery_service",
+];
 
 export enum PolarSensorType {
   ECG = 0,
