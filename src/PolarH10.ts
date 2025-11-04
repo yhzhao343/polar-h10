@@ -47,6 +47,7 @@ export interface PolarH10Data {
   prev_sample_timestamp_ms: number;
   recv_epoch_time_ms: number;
   event_time_offset_ms: number;
+  epoch_timestamps_ms: number[];
 }
 
 export interface HeartRateInfo {
@@ -366,13 +367,17 @@ export class PolarH10 {
       prev_sample_timestamp_ms: 0,
       recv_epoch_time_ms: event.timeStamp + performance.timeOrigin,
       event_time_offset_ms: this.eventTimeOffset,
+      epoch_timestamps_ms: [],
     };
+    let estimated_sample_interval = 0;
+    let s_i_delta = 1;
     switch (type) {
       case PolarSensorType.ACC:
         if (frame_type == 1) {
           dataFrame.samples = new Int16Array(val.buffer.slice(10));
           dataFrame.prev_sample_timestamp_ms = this.lastACCTimestamp;
           this.lastACCTimestamp = offset_timestamp;
+          s_i_delta = 3;
         }
 
         break;
@@ -392,11 +397,25 @@ export class PolarH10 {
           }
           dataFrame.prev_sample_timestamp_ms = this.lastECGTimestamp;
           this.lastECGTimestamp = offset_timestamp;
+          s_i_delta = 1;
         }
         break;
     }
-    for (const handler of this.dataHandleDict[PolarSensorType[type]]) {
-      handler(dataFrame);
+    if (dataFrame.samples !== undefined) {
+      estimated_sample_interval =
+        (dataFrame.sample_timestamp_ms - dataFrame.prev_sample_timestamp_ms) /
+        (dataFrame.samples.length / s_i_delta);
+      if (estimated_sample_interval > 0) {
+        let timeOffset =
+          dataFrame.event_time_offset_ms + dataFrame.prev_sample_timestamp_ms;
+        for (let s_i = 0; s_i < dataFrame.samples.length; s_i + s_i_delta) {
+          timeOffset += estimated_sample_interval;
+          dataFrame.epoch_timestamps_ms.push(timeOffset);
+        }
+        for (const handler of this.dataHandleDict[PolarSensorType[type]]) {
+          handler(dataFrame);
+        }
+      }
     }
   }
 
