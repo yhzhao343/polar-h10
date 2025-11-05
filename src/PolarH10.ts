@@ -33,21 +33,22 @@ export enum PolarSensorType {
   TEMPERATURE = 12,
 }
 
-export type PolarSensorHandlerFunc = (data: PolarH10Data) => void;
-export type HeartRateHandlerFunc = (data: HeartRateInfo) => void;
-
-export interface DataHandlerDict {
-  [key: (typeof PolarSensorNames)[number]]: PolarSensorHandlerFunc[];
-}
-
-export interface PolarH10Data {
+export type PolarH10Data = {
   type: (typeof PolarSensorNames)[number];
   samples?: Int16Array | Int32Array;
   sample_timestamp_ms: number;
   prev_sample_timestamp_ms: number;
   recv_epoch_time_ms: number;
   event_time_offset_ms: number;
-  epoch_timestamps_ms: number[];
+  epoch_timestamps_ms?: Float64Array;
+};
+
+export type PolarSensorHandlerFunc = (data: PolarH10Data) => void;
+export type HeartRateHandlerFunc = (data: HeartRateInfo) => void;
+export type BattLevelHandlerFunc = (data: number) => void;
+
+export interface DataHandlerDict {
+  [key: (typeof PolarSensorNames)[number]]: PolarSensorHandlerFunc[];
 }
 
 export interface HeartRateInfo {
@@ -57,6 +58,7 @@ export interface HeartRateInfo {
 }
 
 export type HeartRateHandlers = HeartRateHandlerFunc[];
+export type BattLevelHandlers = BattLevelHandlerFunc[];
 
 export const PolarSettingNames = Object.keys(PolarSettingType).filter((t) =>
   isNaN(Number(t)),
@@ -101,6 +103,7 @@ export class PolarH10 {
   verbose: boolean = true;
   dataHandleDict: DataHandlerDict = {};
   heartRateHandleList: HeartRateHandlers = [];
+  battLevelHandleList: BattLevelHandlers = [];
   timeOffset: bigint = BigInt(0);
   eventTimeOffset: number;
   lastECGTimestamp: number;
@@ -132,6 +135,12 @@ export class PolarH10 {
   addHeartRateEventListener(handler: HeartRateHandlerFunc) {
     if (!this.heartRateHandleList.includes(handler)) {
       this.heartRateHandleList.push(handler);
+    }
+  }
+
+  addBatteryLevelEventListener(handler: BattLevelHandlerFunc) {
+    if (!this.battLevelHandleList.includes(handler)) {
+      this.battLevelHandleList.push(handler);
     }
   }
 
@@ -184,6 +193,8 @@ export class PolarH10 {
     this.BattLvlChar =
       await this.BattService?.getCharacteristic("battery_level");
     this.log(`    Got battery level characteristic`);
+    await this.BattLvlChar?.startNotifications();
+    this.log(`    Start notification`);
 
     this.HeartRateService = await this.server?.getPrimaryService(
       HEART_RATE_SERVICE_UUID,
@@ -192,9 +203,8 @@ export class PolarH10 {
     this.HeartRateChar = await this.HeartRateService?.getCharacteristic(
       HEART_RATE_MEASUREMENT_CHARACTERISTIC_UUID,
     );
-    // this.log(`  Got heart rate Characteristic`);
-    // this.HeartRateChar?.startNotifications();
-    // this.log(`    Start notification`);
+    await this.HeartRateChar?.startNotifications();
+    this.log(`    Start notification`);
 
     this.PMDDataChar?.addEventListener(
       "characteristicvaluechanged",
@@ -204,6 +214,11 @@ export class PolarH10 {
     this.HeartRateChar?.addEventListener(
       "characteristicvaluechanged",
       this.HearRateHandle.bind(this),
+    );
+
+    this.BattLvlChar?.addEventListener(
+      "characteristicvaluechanged",
+      this.BatteryLevelHandle.bind(this),
     );
   }
 
@@ -309,44 +324,55 @@ export class PolarH10 {
   }
 
   HearRateHandle(event: any) {
-    const val: DataView = event.target.value;
+    if (this.heartRateHandleList.length > 0) {
+      const val: DataView = event.target.value;
 
-    const hear_rate_info: HeartRateInfo = {
-      heart_rate_bpm: -1,
-      rr_intervals_ms: [],
-      recv_epoch_time_ms: event.timeStamp + performance.timeOrigin,
-    };
-    const flags = val.getUint8(0);
-    let offset = 1;
+      const hear_rate_info: HeartRateInfo = {
+        heart_rate_bpm: -1,
+        rr_intervals_ms: [],
+        recv_epoch_time_ms: event.timeStamp + performance.timeOrigin,
+      };
+      const flags = val.getUint8(0);
+      let offset = 1;
 
-    // Determine if HR format is 8-bit (0) or 16-bit (1) based on the first flag bit
-    const heartRateFormat = flags & 0x01;
+      // Determine if HR format is 8-bit (0) or 16-bit (1) based on the first flag bit
+      const heartRateFormat = flags & 0x01;
 
-    if (heartRateFormat === 1) {
-      hear_rate_info.heart_rate_bpm = val.getUint16(offset, true); // 16-bit, little-endian
-      offset += 2;
-    } else {
-      hear_rate_info.heart_rate_bpm = val.getUint8(offset); // 8-bit
-      offset += 1;
-    }
-
-    // Check if R-R intervals are present (Bit 4, val 16)
-    const rrIntervalPresent = (flags & 0x10) !== 0;
-    // const rrIntervals = [];
-
-    if (rrIntervalPresent) {
-      // Read 16-bit R-R intervals until the end of the data view
-      while (offset < val.byteLength) {
-        const rawRrInterval = val.getUint16(offset, true);
-        // Convert raw 1/1024 second units to milliseconds
-        const rrIntervalMs = (rawRrInterval / 1024.0) * 1000.0;
-        hear_rate_info.rr_intervals_ms.push(rrIntervalMs); // Format to 2 decimal places
+      if (heartRateFormat === 1) {
+        hear_rate_info.heart_rate_bpm = val.getUint16(offset, true); // 16-bit, little-endian
         offset += 2;
+      } else {
+        hear_rate_info.heart_rate_bpm = val.getUint8(offset); // 8-bit
+        offset += 1;
+      }
+
+      // Check if R-R intervals are present (Bit 4, val 16)
+      const rrIntervalPresent = (flags & 0x10) !== 0;
+      // const rrIntervals = [];
+
+      if (rrIntervalPresent) {
+        // Read 16-bit R-R intervals until the end of the data view
+        while (offset < val.byteLength) {
+          const rawRrInterval = val.getUint16(offset, true);
+          // Convert raw 1/1024 second units to milliseconds
+          const rrIntervalMs = (rawRrInterval / 1024.0) * 1000.0;
+          hear_rate_info.rr_intervals_ms.push(rrIntervalMs); // Format to 2 decimal places
+          offset += 2;
+        }
+      }
+
+      for (const handler of this.heartRateHandleList) {
+        handler(hear_rate_info);
       }
     }
+  }
 
-    for (const handler of this.heartRateHandleList) {
-      handler(hear_rate_info);
+  BatteryLevelHandle(event: any) {
+    if (this.battLevelHandleList.length > 0) {
+      const batt_level = event.target.value.getUint8();
+      for (const handler of this.battLevelHandleList) {
+        handler(batt_level);
+      }
     }
   }
 
@@ -367,7 +393,6 @@ export class PolarH10 {
       prev_sample_timestamp_ms: 0,
       recv_epoch_time_ms: event.timeStamp + performance.timeOrigin,
       event_time_offset_ms: this.eventTimeOffset,
-      epoch_timestamps_ms: [],
     };
     let estimated_sample_interval = 0;
     let s_i_delta = 1;
@@ -401,16 +426,21 @@ export class PolarH10 {
         }
         break;
     }
-    if (dataFrame.samples !== undefined) {
+    if (
+      dataFrame.samples !== undefined &&
+      this.dataHandleDict[PolarSensorType[type]].length > 0
+    ) {
       estimated_sample_interval =
         (dataFrame.sample_timestamp_ms - dataFrame.prev_sample_timestamp_ms) /
         (dataFrame.samples.length / s_i_delta);
       if (estimated_sample_interval > 0) {
         let timeOffset =
           dataFrame.event_time_offset_ms + dataFrame.prev_sample_timestamp_ms;
-        for (let s_i = 0; s_i < dataFrame.samples.length; s_i + s_i_delta) {
+        const numFrame = Math.floor(dataFrame.samples.length / s_i_delta);
+        dataFrame.epoch_timestamps_ms = new Float64Array(numFrame);
+        for (let i = 0; i < numFrame; i++) {
           timeOffset += estimated_sample_interval;
-          dataFrame.epoch_timestamps_ms.push(timeOffset);
+          dataFrame.epoch_timestamps_ms[i] = timeOffset;
         }
         for (const handler of this.dataHandleDict[PolarSensorType[type]]) {
           handler(dataFrame);

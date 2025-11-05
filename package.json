@@ -1,11 +1,12 @@
 {
   "name": "polar-h10",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "For reading polar-h10 data",
   "license": "ISC",
   "author": "Yuhui Zhao",
   "type": "module",
   "exports": {
+    "types": "./dist/PolarH10.d.ts",
     "require": "./dist/cjs/index.js",
     "import": "./dist/esm/index.js"
   },
