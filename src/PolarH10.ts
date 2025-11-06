@@ -110,6 +110,7 @@ export class PolarH10 {
   lastACCTimestamp: number;
   ACCStarted: boolean = false;
   ECGStarted: boolean = false;
+  battLvl: number;
 
   constructor(device: BluetoothDevice, verbose: boolean = true) {
     this.device = device;
@@ -368,10 +369,10 @@ export class PolarH10 {
   }
 
   BatteryLevelHandle(event: any) {
+    this.battLvl = event.target.value.getUint8();
     if (this.battLevelHandleList.length > 0) {
-      const batt_level = event.target.value.getUint8();
       for (const handler of this.battLevelHandleList) {
-        handler(batt_level);
+        handler(this.battLvl);
       }
     }
   }
