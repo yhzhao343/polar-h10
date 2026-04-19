@@ -319,7 +319,7 @@ export class PolarH10 {
         PolarPMDCommand.GET_MEASUREMENT_SETTINGS,
         sensorId,
       ]);
-      await this.PMDCtrlChar?.writeValue(cmd_buf);
+      await this.PMDCtrlChar?.writeValueWithoutResponse(cmd_buf);
       return await sensorSettingPromise;
     }
   }
@@ -522,7 +522,7 @@ export class PolarH10 {
     cmd_buf[11] = 1;
     cmd_buf_dataview.setUint16(12, resolution, true);
 
-    await this.PMDCtrlChar?.writeValue(cmd_buf);
+    await this.PMDCtrlChar?.writeValueWithoutResponse(cmd_buf);
     const startReply: PMDCtrlReply | undefined = await startACCPromise;
     if (startReply?.error === ERROR_MSGS[0]) {
       this.ACCStarted = true;
@@ -567,7 +567,7 @@ export class PolarH10 {
     cmd_buf[7] = 1;
     cmd_buf_dataview.setUint16(8, sample_rate, true);
 
-    await this.PMDCtrlChar?.writeValue(cmd_buf);
+    await this.PMDCtrlChar?.writeValueWithoutResponse(cmd_buf);
     const startReply: PMDCtrlReply | undefined = await startECGPromise;
     if (startReply?.error === ERROR_MSGS[0]) {
       this.ECGStarted = true;
@@ -622,7 +622,7 @@ export class PolarH10 {
     const cmd_buf = new Uint8Array(2);
     cmd_buf[0] = PolarPMDCommand.REQUEST_MEASUREMENT_STOP;
     cmd_buf[1] = sensorType;
-    await this.PMDCtrlChar?.writeValue(cmd_buf);
+    await this.PMDCtrlChar?.writeValueWithoutResponse(cmd_buf);
     return await endACCPromise;
   }
 }
