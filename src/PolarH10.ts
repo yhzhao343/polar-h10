@@ -89,7 +89,11 @@ export interface PMDCtrlReply {
   reserved?: number;
 }
 
-function readBits(buffer: Uint8Array, bitOffset: number, bitLength: number): number {
+function readBits(
+  buffer: Uint8Array,
+  bitOffset: number,
+  bitLength: number,
+): number {
   let value = 0;
   for (let i = 0; i < bitLength; i++) {
     const totalBitOffset = bitOffset + i;
@@ -197,52 +201,172 @@ export class PolarH10 {
     }
   }
 
-  async init() {
-    this.server = await this.device.gatt?.connect();
-    this.log(`Connecting to ${this.device.name} GATT server...`);
-    this.PMDService = await this.server?.getPrimaryService(PMD_SERVICE_ID);
-    this.log(`  Got PMD Service`);
-    this.PMDCtrlChar = await this.PMDService?.getCharacteristic(PMD_CTRL_CHAR);
-    this.log(`    Got PMD control characteristic`);
-    await this.PMDCtrlChar?.startNotifications();
-    this.log(`    Start notification`);
-    this.PMDDataChar = await this.PMDService?.getCharacteristic(PMD_DATA_CHAR);
-    this.log(`    Got PMD data characteristic`);
-    await this.PMDDataChar?.startNotifications();
-    this.log(`    Start notification`);
+  // Enhanced defensive notification handler
+  async safeStartNotifications(
+    characteristic: BluetoothRemoteGATTCharacteristic | undefined,
+    label: string,
+  ): Promise<void> {
+    if (!characteristic) return;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        await characteristic.startNotifications();
+        this.log(`    Successfully subscribed to ${label} notifications`);
+        return;
+      } catch (error: any) {
+        this.log(
+          `    ⚠️ Attempt ${attempt} failed for ${label}: ${error.message || error}`,
+        );
+
+        if (
+          error.message.includes("range") ||
+          error.message.includes("disconnect")
+        ) {
+          throw error;
+        }
+
+        if (attempt === 2) {
+          throw error;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+  }
+
+  // Outer initialization manager with Pre-Caching Architecture
+  async init(retryAttempt = 0): Promise<void> {
+    try {
+      this.device.removeEventListener(
+        "gattserverdisconnected",
+        this.handleNativeDisconnect,
+      );
+      this.device.addEventListener(
+        "gattserverdisconnected",
+        this.handleNativeDisconnect.bind(this),
+      );
+
+      this.log(
+        `Connecting to ${this.device.name} GATT server... (Attempt ${retryAttempt + 1})`,
+      );
+      this.server = await this.device.gatt?.connect();
+
+      // await new Promise((resolve) => setTimeout(resolve, 500));
+
+      if (!this.server || !this.server.connected) {
+        throw new Error("GATT Server failed to connect.");
+      }
+
+      this.log(`  🔍 Phase 1: Caching GATT Table...`);
+
+      this.PMDService = await this.server.getPrimaryService(PMD_SERVICE_ID);
+      this.PMDCtrlChar = await this.PMDService.getCharacteristic(PMD_CTRL_CHAR);
+      this.PMDDataChar = await this.PMDService.getCharacteristic(PMD_DATA_CHAR);
+
+      this.BattService = await this.server.getPrimaryService("battery_service");
+      this.BattLvlChar =
+        await this.BattService.getCharacteristic("battery_level");
+
+      this.HeartRateService = await this.server.getPrimaryService(
+        HEART_RATE_SERVICE_UUID,
+      );
+      this.HeartRateChar = await this.HeartRateService.getCharacteristic(
+        HEART_RATE_MEASUREMENT_CHARACTERISTIC_UUID,
+      );
+
+      this.log(`  ✅ Phase 1 Complete. All characteristics cached.`);
+      // await new Promise((resolve) => setTimeout(resolve, 100));
+      // =========================================================
+      // PHASE 2: SEQUENTIAL SUBSCRIPTIONS & PAIRING
+      // =========================================================
+      this.log(`  🚀 Phase 2: Starting Subscriptions...`);
+
+      await this.safeStartNotifications(this.BattLvlChar, "Battery Level");
+      await this.safeStartNotifications(this.HeartRateChar, "Heart Rate");
+
+      // === THE WRITE-TO-PAIR KICKSTART ===
+      // We must write a harmless command (Get ECG Settings: 0x01, 0x00)
+      // to trip the device's encryption requirement and trigger the OS prompt.
+      this.log(`    🔑 Forcing OS Pairing Prompt via secure write...`);
+      try {
+        const dummyCmd = new Uint8Array([0x01, 0x00]); // GET_MEASUREMENT_SETTINGS for ECG
+
+        // Use standard writeValue (which defaults to Write with Response)
+        await this.PMDCtrlChar?.writeValue(dummyCmd);
+      } catch (error: any) {
+        // We EXPECT this to throw a security rejection or cause a native disconnect!
+        this.log(`    (Write triggered security sequence: ${error.message})`);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // ===================================
+
+      await this.safeStartNotifications(this.PMDCtrlChar, "PMD Control");
+
+      this.log(
+        `    🔒 Security bond formed. Waiting 50ms for encryption stabilization...`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      await this.safeStartNotifications(this.PMDDataChar, "PMD Data");
+
+      this.streaming = false;
+
+      // --- Bind Data Stream Handlers ---
+      this.PMDDataChar.addEventListener(
+        "characteristicvaluechanged",
+        this.PMDDataHandle.bind(this),
+      );
+      this.HeartRateChar.addEventListener(
+        "characteristicvaluechanged",
+        this.HearRateHandle.bind(this),
+      );
+      this.BattLvlChar.addEventListener(
+        "characteristicvaluechanged",
+        this.BatteryLevelHandle.bind(this),
+      );
+
+      this.log("✅ Polar H10 Driver Fully Initialized and Secured.");
+    } catch (error: any) {
+      const isPairingDrop =
+        error.message.includes("range") ||
+        error.message.includes("disconnected");
+
+      if (isPairingDrop && retryAttempt < 1) {
+        this.log(
+          `🔄 Connection severed due to OS Pairing/Bonding cycle. Waiting 1s for hardware link to recycle...`,
+        );
+        this.streaming = false;
+        this.ACCStarted = false;
+        this.ECGStarted = false;
+
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return this.init(retryAttempt + 1);
+      }
+
+      if (error.message.includes("range") && retryAttempt >= 1) {
+        this.log(
+          `❌ Fatal: Chromium Web Bluetooth encountered a Ghost Handle state.`,
+        );
+        this.log(
+          `💡 FIX: Because the device IRK rotated, the browser's device reference is permanently dead.`,
+        );
+        this.log(
+          `👉 You MUST use OS-level Bluetooth pairing before connecting.`,
+        );
+      } else {
+        this.log(`❌ Initialization totally failed: ${error.message}`);
+      }
+      throw error;
+    }
+  }
+
+  handleNativeDisconnect() {
+    this.log("⚠️ GATT Server disconnected natively.");
     this.streaming = false;
-    this.BattService = await this.server?.getPrimaryService("battery_service");
-    this.log(`  Got battery Service`);
-    this.BattLvlChar =
-      await this.BattService?.getCharacteristic("battery_level");
-    this.log(`    Got battery level characteristic`);
-    await this.BattLvlChar?.startNotifications();
-    this.log(`    Start notification`);
-
-    this.HeartRateService = await this.server?.getPrimaryService(
-      HEART_RATE_SERVICE_UUID,
-    );
-    this.log(`  Got heart rate Service`);
-    this.HeartRateChar = await this.HeartRateService?.getCharacteristic(
-      HEART_RATE_MEASUREMENT_CHARACTERISTIC_UUID,
-    );
-    await this.HeartRateChar?.startNotifications();
-    this.log(`    Start notification`);
-
-    this.PMDDataChar?.addEventListener(
-      "characteristicvaluechanged",
-      this.PMDDataHandle.bind(this),
-    );
-
-    this.HeartRateChar?.addEventListener(
-      "characteristicvaluechanged",
-      this.HearRateHandle.bind(this),
-    );
-
-    this.BattLvlChar?.addEventListener(
-      "characteristicvaluechanged",
-      this.BatteryLevelHandle.bind(this),
-    );
+    this.ACCStarted = false;
+    this.ECGStarted = false;
   }
 
   PMDCtrlCharHandle(event: any) {
@@ -266,18 +390,19 @@ export class PolarH10 {
     const PMEFeatures: DataView | undefined =
       await this.PMDCtrlChar?.readValue();
     const featureList: typeof PolarSensorNames = [];
+    this.log(PMEFeatures);
     if (PMEFeatures !== undefined) {
       // if (PMEFeatures.byteLength === 17) {
       if (PMEFeatures !== undefined && PMEFeatures.byteLength >= 2) {
-        if (PMEFeatures.getUint8(0) === 0xf) {
-          const feature_num = PMEFeatures.getUint8(1);
-          for (let i = 0; i < PolarSensorNames.length; i++) {
-            const sensor_name = PolarSensorNames[i];
-            if ((feature_num >> PolarSensorType[sensor_name]) & 0x01) {
-              featureList.push(sensor_name);
-            }
+        // if (PMEFeatures.getUint8(0) === 0xf) {
+        const feature_num = PMEFeatures.getUint8(1);
+        for (let i = 0; i < PolarSensorNames.length; i++) {
+          const sensor_name = PolarSensorNames[i];
+          if ((feature_num >> PolarSensorType[sensor_name]) & 0x01) {
+            featureList.push(sensor_name);
           }
         }
+        // }
       }
     }
 
@@ -428,7 +553,6 @@ export class PolarH10 {
           this.lastACCTimestamp = offset_timestamp;
           s_i_delta = 3;
         } else if (frame_type === 2) {
-
           // Firmware v4: Delta-Delta Compressed triplets
           // 1. Read 16-bit reference coordinates (Bytes 10-15)
           const refX = val.getInt16(10, true);
@@ -520,7 +644,10 @@ export class PolarH10 {
           const rawData = new Uint8Array(val.buffer);
 
           // 1. Get 24-bit reference sample
-          let refSample = val.getUint8(10) | (val.getUint8(11) << 8) | (val.getUint8(12) << 16);
+          let refSample =
+            val.getUint8(10) |
+            (val.getUint8(11) << 8) |
+            (val.getUint8(12) << 16);
           if (refSample & 0x800000) refSample |= 0xff000000; // Sign extend 24-bit to 32-bit
 
           // 2. Get bit size of deltas
