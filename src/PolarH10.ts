@@ -89,6 +89,28 @@ export interface PMDCtrlReply {
   reserved?: number;
 }
 
+function readBits(buffer: Uint8Array, bitOffset: number, bitLength: number): number {
+  let value = 0;
+  for (let i = 0; i < bitLength; i++) {
+    const totalBitOffset = bitOffset + i;
+    const byteIndex = Math.floor(totalBitOffset / 8);
+    const bitIndex = totalBitOffset % 8;
+
+    if (byteIndex >= buffer.length) break;
+
+    const bit = (buffer[byteIndex] >> bitIndex) & 1;
+    value |= bit << i;
+  }
+
+  // Sign extension for signed deltas
+  const signBit = 1 << (bitLength - 1);
+  if (value & signBit) {
+    value |= ~((1 << bitLength) - 1);
+  }
+
+  return value;
+}
+
 export class PolarH10 {
   device: BluetoothDevice;
   server: BluetoothRemoteGATTServer | undefined = undefined;
@@ -245,7 +267,8 @@ export class PolarH10 {
       await this.PMDCtrlChar?.readValue();
     const featureList: typeof PolarSensorNames = [];
     if (PMEFeatures !== undefined) {
-      if (PMEFeatures.byteLength === 17) {
+      // if (PMEFeatures.byteLength === 17) {
+      if (PMEFeatures !== undefined && PMEFeatures.byteLength >= 2) {
         if (PMEFeatures.getUint8(0) === 0xf) {
           const feature_num = PMEFeatures.getUint8(1);
           for (let i = 0; i < PolarSensorNames.length; i++) {
@@ -404,6 +427,74 @@ export class PolarH10 {
           dataFrame.prev_sample_timestamp_ms = this.lastACCTimestamp;
           this.lastACCTimestamp = offset_timestamp;
           s_i_delta = 3;
+        } else if (frame_type === 2) {
+
+          // Firmware v4: Delta-Delta Compressed triplets
+          // 1. Read 16-bit reference coordinates (Bytes 10-15)
+          const refX = val.getInt16(10, true);
+          const refY = val.getInt16(12, true);
+          const refZ = val.getInt16(14, true);
+
+          // 2. Extract bit size per component (Byte 16)
+          const deltaSize = val.getUint8(16);
+
+          if (deltaSize > 0) {
+            const rawData = new Uint8Array(val.buffer);
+            const deltaBuffer = rawData.subarray(17); // Deltas start at byte 17
+            const remainingBits = deltaBuffer.length * 8;
+            const numTriplets = Math.floor(remainingBits / (deltaSize * 3)); // 3 axes per triplet
+
+            // Allocate spatial buffer array for all recovered coordinates
+            dataFrame.samples = new Int16Array((numTriplets + 1) * 3);
+
+            // Set the first triplet equal to the reference samples
+            dataFrame.samples[0] = refX;
+            dataFrame.samples[1] = refY;
+            dataFrame.samples[2] = refZ;
+
+            let bitOffset = 0;
+            let currentX = refX;
+            let currentY = refY;
+            let currentZ = refZ;
+
+            // Initialize delta velocities
+            let deltaX = 0;
+            let deltaY = 0;
+            let deltaZ = 0;
+
+            // 3. Unpack bitstream and integrate changes sequentially
+            for (let i = 0; i < numTriplets; i++) {
+              const ddx = readBits(deltaBuffer, bitOffset, deltaSize);
+              bitOffset += deltaSize;
+              const ddy = readBits(deltaBuffer, bitOffset, deltaSize);
+              bitOffset += deltaSize;
+              const ddz = readBits(deltaBuffer, bitOffset, deltaSize);
+              bitOffset += deltaSize;
+
+              // Integrate second-order delta-deltas into first-order deltas
+              deltaX += ddx;
+              deltaY += ddy;
+              deltaZ += ddz;
+
+              // Integrate deltas into absolute sample positions
+              currentX += deltaX;
+              currentY += deltaY;
+              currentZ += deltaZ;
+
+              // Store output values sequentially in a flat structure
+              const baseIdx = (i + 1) * 3;
+              dataFrame.samples[baseIdx] = currentX;
+              dataFrame.samples[baseIdx + 1] = currentY;
+              dataFrame.samples[baseIdx + 2] = currentZ;
+            }
+          } else {
+            // Safety fallback: if deltaSize is 0, the device recorded no motion changes
+            dataFrame.samples = new Int16Array([refX, refY, refZ]);
+          }
+
+          dataFrame.prev_sample_timestamp_ms = this.lastACCTimestamp;
+          this.lastACCTimestamp = offset_timestamp;
+          s_i_delta = 3; // 3 items per point coordinate calculation block
         }
 
         break;
@@ -421,6 +512,38 @@ export class PolarH10 {
             }
             dataFrame.samples[Math.floor((i - 10) / 3)] = d;
           }
+          dataFrame.prev_sample_timestamp_ms = this.lastECGTimestamp;
+          this.lastECGTimestamp = offset_timestamp;
+          s_i_delta = 1;
+        } else if (frame_type === 1) {
+          // FW v4 Delta Compressed Parsing
+          const rawData = new Uint8Array(val.buffer);
+
+          // 1. Get 24-bit reference sample
+          let refSample = val.getUint8(10) | (val.getUint8(11) << 8) | (val.getUint8(12) << 16);
+          if (refSample & 0x800000) refSample |= 0xff000000; // Sign extend 24-bit to 32-bit
+
+          // 2. Get bit size of deltas
+          const deltaSize = rawData[13];
+
+          // 3. Determine how many deltas are packed in the remaining buffer
+          const remainingBits = (rawData.length - 14) * 8;
+          const numDeltas = Math.floor(remainingBits / deltaSize);
+
+          dataFrame.samples = new Int32Array(numDeltas + 1);
+          dataFrame.samples[0] = refSample;
+
+          let currentSample = refSample;
+          let bitOffset = 0;
+          const deltaBuffer = rawData.subarray(14);
+
+          for (let i = 0; i < numDeltas; i++) {
+            const delta = readBits(deltaBuffer, bitOffset, deltaSize);
+            bitOffset += deltaSize;
+            currentSample += delta;
+            dataFrame.samples[i + 1] = currentSample;
+          }
+
           dataFrame.prev_sample_timestamp_ms = this.lastECGTimestamp;
           this.lastECGTimestamp = offset_timestamp;
           s_i_delta = 1;
