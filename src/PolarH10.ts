@@ -292,14 +292,14 @@ export class PolarH10 {
       try {
         const dummyCmd = new Uint8Array([0x01, 0x00]); // GET_MEASUREMENT_SETTINGS for ECG
 
-        // Use standard writeValue (which defaults to Write with Response)
+        // Use standard writeValue
         await this.PMDCtrlChar?.writeValue(dummyCmd);
       } catch (error: any) {
-        // We EXPECT this to throw a security rejection or cause a native disconnect!
         this.log(`    (Write triggered security sequence: ${error.message})`);
+        await new Promise((resolve) => setTimeout(resolve, 2500));
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 50));
+
       // ===================================
 
       await this.safeStartNotifications(this.PMDCtrlChar, "PMD Control");
