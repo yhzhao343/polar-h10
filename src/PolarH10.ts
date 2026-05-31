@@ -148,6 +148,8 @@ export class PolarH10 {
     for (let i = 0; i < PolarSensorNames.length; i++) {
       this.dataHandleDict[PolarSensorNames[i]] = [];
     }
+    this.eventTimeOffset = 0
+    this.battLvl = 0
   }
 
   addEventListener(
@@ -236,7 +238,7 @@ export class PolarH10 {
   }
 
   // Outer initialization manager with Pre-Caching Architecture
-  async init(retryAttempt = 0): Promise<void> {
+  async init(pairing_wait_ms = 10000, retryAttempt = 0): Promise<void> {
     try {
       this.device.removeEventListener(
         "gattserverdisconnected",
@@ -275,20 +277,17 @@ export class PolarH10 {
         HEART_RATE_MEASUREMENT_CHARACTERISTIC_UUID,
       );
 
-      this.log(`  ✅ Phase 1 Complete. All characteristics cached.`);
-      // await new Promise((resolve) => setTimeout(resolve, 100));
+      this.log(`  [Success] Phase 1 Complete. All characteristics cached.`);
+
       // =========================================================
       // PHASE 2: SEQUENTIAL SUBSCRIPTIONS & PAIRING
       // =========================================================
-      this.log(`  🚀 Phase 2: Starting Subscriptions...`);
-
-      await this.safeStartNotifications(this.BattLvlChar, "Battery Level");
-      await this.safeStartNotifications(this.HeartRateChar, "Heart Rate");
+      this.log(`    Phase 2: Starting Subscriptions...`);
 
       // === THE WRITE-TO-PAIR KICKSTART ===
       // We must write a harmless command (Get ECG Settings: 0x01, 0x00)
       // to trip the device's encryption requirement and trigger the OS prompt.
-      this.log(`    🔑 Forcing OS Pairing Prompt via secure write...`);
+      this.log(`      Forcing OS Pairing Prompt via secure write...`);
       try {
         const dummyCmd = new Uint8Array([0x01, 0x00]); // GET_MEASUREMENT_SETTINGS for ECG
 
@@ -296,38 +295,32 @@ export class PolarH10 {
         await this.PMDCtrlChar?.writeValue(dummyCmd);
       } catch (error: any) {
         this.log(`    (Write triggered security sequence: ${error.message})`);
-        await new Promise((resolve) => setTimeout(resolve, 2500));
+        await new Promise((resolve) => setTimeout(resolve, pairing_wait_ms));
       }
-
-
-      // ===================================
 
       await this.safeStartNotifications(this.PMDCtrlChar, "PMD Control");
 
-      this.log(
-        `    🔒 Security bond formed. Waiting 50ms for encryption stabilization...`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      await this.safeStartNotifications(this.PMDDataChar, "PMD Data");
-
-      this.streaming = false;
-
-      // --- Bind Data Stream Handlers ---
       this.PMDDataChar.addEventListener(
         "characteristicvaluechanged",
         this.PMDDataHandle.bind(this),
       );
+      await this.safeStartNotifications(this.PMDDataChar, "PMD Data");
+
       this.HeartRateChar.addEventListener(
         "characteristicvaluechanged",
         this.HearRateHandle.bind(this),
       );
+      await this.safeStartNotifications(this.BattLvlChar, "Battery Level");
+
       this.BattLvlChar.addEventListener(
         "characteristicvaluechanged",
         this.BatteryLevelHandle.bind(this),
       );
+      await this.safeStartNotifications(this.HeartRateChar, "Heart Rate");
 
-      this.log("✅ Polar H10 Driver Fully Initialized and Secured.");
+      this.streaming = false;
+
+      this.log("[Success] Polar H10 Driver Initialized");
     } catch (error: any) {
       const isPairingDrop =
         error.message.includes("range") ||
@@ -335,35 +328,32 @@ export class PolarH10 {
 
       if (isPairingDrop && retryAttempt < 1) {
         this.log(
-          `🔄 Connection severed due to OS Pairing/Bonding cycle. Waiting 1s for hardware link to recycle...`,
+          `[linking] Connection severed due to OS Pairing/Bonding cycle. Waiting 1s for hardware link to recycle...`,
         );
         this.streaming = false;
         this.ACCStarted = false;
         this.ECGStarted = false;
 
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        return this.init(retryAttempt + 1);
+        // await new Promise((resolve) => setTimeout(resolve, 200));
+        return this.init(pairing_wait_ms, retryAttempt + 1);
       }
 
       if (error.message.includes("range") && retryAttempt >= 1) {
         this.log(
-          `❌ Fatal: Chromium Web Bluetooth encountered a Ghost Handle state.`,
+          `[Fatal]: Chromium Web Bluetooth encountered a Ghost Handle state.`,
         );
         this.log(
-          `💡 FIX: Because the device IRK rotated, the browser's device reference is permanently dead.`,
-        );
-        this.log(
-          `👉 You MUST use OS-level Bluetooth pairing before connecting.`,
+          `You MUST use OS-level Bluetooth pairing before connecting.`,
         );
       } else {
-        this.log(`❌ Initialization totally failed: ${error.message}`);
+        this.log(`[Failed] Initialization failed: ${error.message}`);
       }
       throw error;
     }
   }
 
   handleNativeDisconnect() {
-    this.log("⚠️ GATT Server disconnected natively.");
+    this.log("[!!!] GATT Server disconnected natively.");
     this.streaming = false;
     this.ACCStarted = false;
     this.ECGStarted = false;
@@ -397,7 +387,7 @@ export class PolarH10 {
         // if (PMEFeatures.getUint8(0) === 0xf) {
         const feature_num = PMEFeatures.getUint8(1);
         for (let i = 0; i < PolarSensorNames.length; i++) {
-          const sensor_name = PolarSensorNames[i];
+          const sensor_name = PolarSensorNames[i] as (keyof typeof PolarSensorType);
           if ((feature_num >> PolarSensorType[sensor_name]) & 0x01) {
             featureList.push(sensor_name);
           }
@@ -432,10 +422,10 @@ export class PolarH10 {
         i += 1;
         const arr_len = val.getUint8(i);
         i += 1;
-        const setting_name = PolarSettingType[setting_type];
+        const setting_name = PolarSettingType[setting_type] as (keyof typeof setting_parsers)
         info.settings[setting_name] = [];
         for (let arr_i = 0; arr_i < arr_len; arr_i++) {
-          info.settings[setting_name].push(
+          (info.settings[setting_name] as any[]).push(
             setting_parsers[setting_name](val, i),
           );
           i += setting_parser_offsets[setting_name];
@@ -532,6 +522,7 @@ export class PolarH10 {
       this.timeOffset = dataTimeStamp;
       this.eventTimeOffset = event.timeStamp + performance.timeOrigin;
     }
+
     const offset_timestamp = Number(dataTimeStamp - this.timeOffset) / 1e6;
     const type = val.getUint8(0);
     const frame_type = val.getUint8(9);
